@@ -489,30 +489,33 @@ class DataFrame(object):
         if axis is not None:
             raise ValueError('only axis=None is supported')
         expression = _ensure_string_from_expression(expression)
-        ordered_set = self._set(expression, progress=progress, selection=selection, flatten=axis is None)
-        transient = True
-        data_type_item = self.data_type(expression, axis=-1)
-        if return_inverse:
-            # inverse type can be smaller, depending on length of set
-            inverse = np.zeros(self._length_unfiltered, dtype=np.int64)
-            dtype = self.data_type(expression)
-            from vaex.column import _to_string_sequence
-            def map(thread_index, i1, i2, ar):
-                if vaex.array_types.is_string_type(dtype):
-                    previous_ar = ar
-                    ar = _to_string_sequence(ar)
-                    if not transient:
-                        assert ar is previous_ar.string_sequence
-                # TODO: what about masked values?
-                inverse[i1:i2] = ordered_set.map_ordinal(ar)
-            def reduce(a, b):
-                pass
-            self.map_reduce(map, reduce, [expression], delay=delay, name='unique_return_inverse', info=True, to_numpy=False, selection=selection)
-        keys = ordered_set.keys()
-        if not dropnan and ordered_set.has_nan:
-            keys = [math.nan] + keys
-        if not dropmissing and ordered_set.has_null:
-            keys = [None] + keys
+        if self.is_category(expression):
+            keys = self.category_labels(expression)
+        else:
+            ordered_set = self._set(expression, progress=progress, selection=selection, flatten=axis is None)
+            transient = True
+            data_type_item = self.data_type(expression, axis=-1)
+            if return_inverse:
+                # inverse type can be smaller, depending on length of set
+                inverse = np.zeros(self._length_unfiltered, dtype=np.int64)
+                dtype = self.data_type(expression)
+                from vaex.column import _to_string_sequence
+                def map(thread_index, i1, i2, ar):
+                    if vaex.array_types.is_string_type(dtype):
+                        previous_ar = ar
+                        ar = _to_string_sequence(ar)
+                        if not transient:
+                            assert ar is previous_ar.string_sequence
+                    # TODO: what about masked values?
+                    inverse[i1:i2] = ordered_set.map_ordinal(ar)
+                def reduce(a, b):
+                    pass
+                self.map_reduce(map, reduce, [expression], delay=delay, name='unique_return_inverse', info=True, to_numpy=False, selection=selection)
+            keys = ordered_set.keys()
+            if not dropnan and ordered_set.has_nan:
+                keys = [math.nan] + keys
+            if not dropmissing and ordered_set.has_null:
+                keys = [None] + keys
         keys = vaex.array_types.convert(keys, array_type)
         if return_inverse:
             return keys, inverse
@@ -1940,7 +1943,7 @@ class DataFrame(object):
         return (rows,) + sample.shape[1:]
 
     # TODO: remove array_type and internal arguments?
-    def data_type(self, expression, array_type=None, internal=False, axis=0):
+    def data_type(self, expression, array_type=None, encode=True, internal=False, axis=0):
         """Return the datatype for the given expression, if not a column, the first row will be evaluated to get the data type.
 
         Example:
@@ -1954,6 +1957,8 @@ class DataFrame(object):
         data_type = None
         if expression in self.variables:
             data_type = np.float64(1).dtype
+        elif self.is_category(expression) and encode:
+            data = array_types.to_arrow(self.category_labels(expression))
         elif self.is_local() and expression in self.columns.keys():
             column = self.columns[expression]
             if hasattr(column, 'dtype'):
@@ -1989,6 +1994,9 @@ class DataFrame(object):
         else:
             raise ValueError(f'Unknown array_type {array_type}')
         data_type = DataType(data_type)
+        if not encode and data_type.is_arrow:
+            if isinstance(data_type.internal, pa.DictionaryType):
+                data_type = vaex.dtype(data_type.internal.index_type)
 
         # ugly, but fixes df.x.apply(lambda x: str(x))
         if not internal:
@@ -2621,7 +2629,7 @@ class DataFrame(object):
 
         # if _is_string(selection):
 
-    def evaluate(self, expression, i1=None, i2=None, out=None, selection=None, filtered=True, array_type=None, parallel=True, chunk_size=None):
+    def evaluate(self, expression, i1=None, i2=None, out=None, selection=None, filtered=True, array_type=None, parallel=True, chunk_size=None, encode=True):
         """Evaluate an expression, and return a numpy array with the results for the full column or a part of it.
 
         Note that this is not how vaex should be used, since it means a copy of the data needs to fit in memory.
@@ -2637,11 +2645,11 @@ class DataFrame(object):
         :return:
         """
         if chunk_size is not None:
-            return self.evaluate_iterator(expression, s1=i1, s2=i2, out=out, selection=selection, filtered=filtered, array_type=array_type, parallel=parallel, chunk_size=chunk_size)
+            return self.evaluate_iterator(expression, s1=i1, s2=i2, out=out, selection=selection, filtered=filtered, array_type=array_type, parallel=parallel, chunk_size=chunk_size, encode=encode)
         else:
-            return self._evaluate_implementation(expression, i1=i1, i2=i2, out=out, selection=selection, filtered=filtered, array_type=array_type, parallel=parallel, chunk_size=chunk_size)
+            return self._evaluate_implementation(expression, i1=i1, i2=i2, out=out, selection=selection, filtered=filtered, array_type=array_type, parallel=parallel, chunk_size=chunk_size, encode=encode)
 
-    def evaluate_iterator(self, expression, s1=None, s2=None, out=None, selection=None, filtered=True, array_type=None, parallel=True, chunk_size=None, prefetch=True):
+    def evaluate_iterator(self, expression, s1=None, s2=None, out=None, selection=None, filtered=True, array_type=None, parallel=True, chunk_size=None, prefetch=True, encode=True):
         """Generator to efficiently evaluate expressions in chunks (number of rows).
 
         See :func:`DataFrame.evaluate` for other arguments.
@@ -2665,13 +2673,13 @@ class DataFrame(object):
         if not prefetch:
             # this is the simple implementation
             for l1, l2, i1, i2 in self._unfiltered_chunk_slices(chunk_size):
-                yield l1, l2, self._evaluate_implementation(expression, i1=i1, i2=i2, out=out, selection=selection, filtered=filtered, array_type=array_type, parallel=parallel, raw=True)
+                yield l1, l2, self._evaluate_implementation(expression, i1=i1, i2=i2, out=out, selection=selection, filtered=filtered, array_type=array_type, parallel=parallel, raw=True, encode=encode)
         # But this implementation is faster if the main thread work is single threaded
         else:
             with concurrent.futures.ThreadPoolExecutor(1) as executor:
                 iter = self._unfiltered_chunk_slices(chunk_size)
                 def f(i1, i2):
-                    return self._evaluate_implementation(expression, i1=i1, i2=i2, out=out, selection=selection, filtered=filtered, array_type=array_type, parallel=parallel, raw=True)
+                    return self._evaluate_implementation(expression, i1=i1, i2=i2, out=out, selection=selection, filtered=filtered, array_type=array_type, parallel=parallel, raw=True, encode=encode)
                 previous_l1, previous_l2, previous_i1, previous_i2 = next(iter)
                 # we submit the 1st job
                 previous = executor.submit(f, previous_i1, previous_i2)
@@ -2687,7 +2695,7 @@ class DataFrame(object):
                 yield previous_l1, previous_l2, previous_chunk
 
     @docsubst
-    def to_items(self, column_names=None, selection=None, strings=True, virtual=True, parallel=True, chunk_size=None, array_type=None):
+    def to_items(self, column_names=None, selection=None, strings=True, virtual=True, parallel=True, chunk_size=None, array_type=None, encode=True):
         """Return a list of [(column_name, ndarray), ...)] pairs where the ndarray corresponds to the evaluated data
 
         :param column_names: list of column names, to export, when None DataFrame.get_column_names(strings=strings, virtual=virtual) is used
@@ -2703,14 +2711,14 @@ class DataFrame(object):
         column_names = _ensure_strings_from_expressions(column_names)
         if chunk_size is not None:
             def iterator():
-                for i1, i2, chunks in self.evaluate_iterator(column_names, selection=selection, parallel=parallel, chunk_size=chunk_size):
+                for i1, i2, chunks in self.evaluate_iterator(column_names, selection=selection, parallel=parallel, chunk_size=chunk_size, encode=encode):
                     yield i1, i2, list(zip(column_names, [array_types.convert(chunk, array_type) for chunk in chunks]))
             return iterator()
         else:
-            return list(zip(column_names, [array_types.convert(chunk, array_type) for chunk in self.evaluate(column_names, selection=selection, parallel=parallel)]))
+            return list(zip(column_names, [array_types.convert(chunk, array_type) for chunk in self.evaluate(column_names, selection=selection, parallel=parallel, encode=encode)]))
 
     @docsubst
-    def to_arrays(self, column_names=None, selection=None, strings=True, virtual=True, parallel=True, chunk_size=None, array_type=None):
+    def to_arrays(self, column_names=None, selection=None, strings=True, virtual=True, parallel=True, chunk_size=None, array_type=None, encode=True):
         """Return a list of ndarrays
 
         :param column_names: list of column names, to export, when None DataFrame.get_column_names(strings=strings, virtual=virtual) is used
@@ -2726,13 +2734,13 @@ class DataFrame(object):
         column_names = _ensure_strings_from_expressions(column_names)
         if chunk_size is not None:
             def iterator():
-                for i1, i2, chunks in self.evaluate_iterator(column_names, selection=selection, parallel=parallel, chunk_size=chunk_size):
+                for i1, i2, chunks in self.evaluate_iterator(column_names, selection=selection, parallel=parallel, chunk_size=chunk_size, encode=encode):
                     yield i1, i2, [array_types.convert(chunk, array_type) for chunk in chunks]
             return iterator()
-        return [array_types.convert(chunk, array_type) for chunk in self.evaluate(column_names, selection=selection, parallel=parallel)]
+        return [array_types.convert(chunk, array_type) for chunk in self.evaluate(column_names, selection=selection, parallel=parallel, encode=encode)]
 
     @docsubst
-    def to_dict(self, column_names=None, selection=None, strings=True, virtual=True, parallel=True, chunk_size=None, array_type=None):
+    def to_dict(self, column_names=None, selection=None, strings=True, virtual=True, parallel=True, chunk_size=None, array_type=None, encode=True):
         """Return a dict containing the ndarray corresponding to the evaluated data
 
         :param column_names: list of column names, to export, when None DataFrame.get_column_names(strings=strings, virtual=virtual) is used
@@ -2751,7 +2759,7 @@ class DataFrame(object):
                 for i1, i2, chunks in self.evaluate_iterator(column_names, selection=selection, parallel=parallel, chunk_size=chunk_size):
                     yield i1, i2, dict(list(zip(column_names, [array_types.convert(chunk, array_type) for chunk in chunks])))
             return iterator()
-        return dict(list(zip(column_names, [array_types.convert(chunk, array_type) for chunk in self.evaluate(column_names, selection=selection, parallel=parallel)])))
+        return dict(list(zip(column_names, [array_types.convert(chunk, array_type) for chunk in self.evaluate(column_names, selection=selection, parallel=parallel, encode=encode)])))
 
     @docsubst
     def to_copy(self, column_names=None, selection=None, strings=True, virtual=True, selections=True):
@@ -4902,7 +4910,7 @@ class DataFrame(object):
 
     def _binner_ordinal(self, expression, ordinal_count, min_value=0):
         expression = _ensure_string_from_expression(expression)
-        type = vaex.utils.find_type_from_dtype(vaex.superagg, "BinnerOrdinal_", self.data_type(expression))
+        type = vaex.utils.find_type_from_dtype(vaex.superagg, "BinnerOrdinal_", self.data_type(expression, encode=False))
         return type(expression, ordinal_count, min_value)
 
     def _create_grid(self, binby, limits, shape, selection=None, delay=False):
@@ -5087,6 +5095,8 @@ class DataFrameLocal(DataFrame):
         """
         df = self if inplace else self.copy()
         column = _ensure_string_from_expression(column)
+        if df[column].dtype != int:
+            raise TypeError(f'Only integer columns can be marked as categorical, {column} is {df[column].dtype}')
         if max_value is not None:
             labels = list(range(min_value, max_value+1))
             N = len(labels)
@@ -5544,7 +5554,7 @@ class DataFrameLocal(DataFrame):
             for i1, i2 in vaex.utils.subdivide(logical_length, max_length=chunk_size):
                 yield i1, i2, i1, i2
 
-    def _evaluate_implementation(self, expression, i1=None, i2=None, out=None, selection=None, filtered=True, array_type=None, parallel=True, chunk_size=None, raw=False):
+    def _evaluate_implementation(self, expression, i1=None, i2=None, out=None, selection=None, filtered=True, array_type=None, parallel=True, chunk_size=None, raw=False, encode=True):
         """The real implementation of :func:`DataFrame.evaluate` (not returning a generator).
 
         :param raw: Whether indices i1 and i2 refer to unfiltered (raw=True) or 'logical' offsets (raw=False)
@@ -5655,9 +5665,17 @@ class DataFrameLocal(DataFrame):
                         values = array_types.convert(chunks[0], array_type)
                     else:
                         values = array_types.convert(chunks, array_type)
-                    return values
                 else:
-                    return array_types.convert(arrays[expression], array_type)
+                    values = array_types.convert(arrays[expression], array_type)
+                if encode and self.is_category(expression):
+                    dictionary = array_types.to_arrow(self.category_labels(expression))
+                    values = array_types.to_arrow(values)
+                    if isinstance(values, pa.ChunkedArray):
+                        chunks = [pa.DictionaryArray.from_arrays(k, dictionary) for k in values.chunks]
+                        values = pa.chunked_array(chunks)
+                    else:
+                        values = pa.DictionaryArray.from_arrays(values, dictionary)
+                return values
             result = [finalize_result(k) for k in expressions]
             if not was_list:
                 result = result[0]
@@ -5689,7 +5707,12 @@ class DataFrameLocal(DataFrame):
                 # if isinstance(value, ColumnString) and not internal:
                 #     value = value.to_numpy()
                 # print("before", value)
-                value = array_types.convert(value, array_type)
+                if encode and self.is_category(expression):
+                    dictionary = array_types.to_arrow(self.category_labels(expression))
+                    value = array_types.to_arrow(value)
+                    value = pa.DictionaryArray.from_arrays(value, dictionary)
+                else:
+                    value = array_types.convert(value, array_type)
                 # print("after", value)
                 values.append(value)
             if not was_list:

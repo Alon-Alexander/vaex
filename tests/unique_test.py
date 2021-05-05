@@ -77,3 +77,10 @@ def test_unique_list(df_types):
     df = df_types
     assert set(df.string_list.unique()) == {'aap', 'noot', 'mies', None}
     assert set(df.int_list.unique()) == {1, 2, 3, 4, 5, None}
+
+
+def test_unique_categorical(df_factory):
+    df = df_factory(x=vaex.string_column(['a', 'c', 'b', 'a', 'a']))
+    df = df.ordinal_encode('x')
+    assert df.x.dtype == str
+    assert set(df.x.unique()) == {'a', 'b', 'c'}

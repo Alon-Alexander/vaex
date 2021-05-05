@@ -95,6 +95,11 @@ class Meta(type):
                 def f(a, b):
                     self = a
                     # print(op, a, b)
+                    if self.df.is_category(self.expression):
+                        labels = self.df.category_labels(self.expression)
+                        if b not in labels:
+                            raise ValueError(f'Value {b} not present in {labels}')
+                        b = labels.index(b)
                     try:
                         stringy = isinstance(b, str) or b.is_string()
                     except:
@@ -285,8 +290,8 @@ class Expression(with_metaclass(Meta)):
         return self.df.data_type(self.expression)
 
     # TODO: remove this method?
-    def data_type(self, array_type=None, axis=0):
-        return self.df.data_type(self.expression, axis=axis)
+    def data_type(self, array_type=None, axis=0, encode=True):
+        return self.df.data_type(self.expression, axis=axis, encode=encode)
 
     @property
     def shape(self):

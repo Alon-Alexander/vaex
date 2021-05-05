@@ -8,6 +8,8 @@ def test_cat_string():
     ds0 = vaex.from_arrays(colors=['red', 'green', 'blue', 'green'])
     ds = ds0.ordinal_encode('colors')#, ['red', 'green'], inplace=True)
     assert ds.is_category('colors')
+    assert ds.data_type('colors') == str
+    assert ds.data_type('colors', encode=False) == int
     assert ds.limits('colors', shape=128) == ([-0.5, 2.5], 3)
 
     ds = ds0.ordinal_encode('colors', values=['red', 'green'])
@@ -39,6 +41,7 @@ def test_categorize():
     assert ds0.category_labels(ds0.c) == ['a', 'b', 'c', 'd']
     assert ds0.category_count(ds0.c) == 4
 
+
 def test_cat_missing_values():
     colors = ['red', 'green', 'blue', 'green', 'MISSING']
     mask   = [False, False,   False,   False,  True]
@@ -63,3 +66,13 @@ def test_categorize_integers():
     df.categorize('x', inplace=True)  # same, but calculated from data
     assert df.count(binby='x').tolist() == [1] * 10
     assert df.binby('x', 'count').data.tolist() == [1] * 10
+
+
+def test_cat_compare(df_factory):
+    df = df_factory(x=np.array([0, 1, 2, 0], dtype='uint8'))
+    df = df.categorize('x', labels=['a', 'b', 'c'])
+    assert df['x'].tolist() == ['a', 'b', 'c', 'a']
+    assert str(df.x == 'a') == '(x == 0)'
+    assert df[df.x == 'a'].x.tolist() == ['a', 'a']
+    with pytest.raises(ValueError):
+        assert str(df.x == 'x') == '(x == 0)'
